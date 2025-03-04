@@ -26,7 +26,7 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from torch.distributions import Distribution,MixtureSameFamily,Categorical,Normal,Independent
+import torch.distributions as Dist
 
 from .configuration_tinytimemixer import TinyTimeMixerConfig
 
@@ -1698,7 +1698,7 @@ class SampleTinyTimeMixerPredictionOutput(ModelOutput):
     sequences: torch.FloatTensor = None
 
 
-def nll(input: torch.distributions.Distribution, target: torch.Tensor) -> torch.Tensor:
+def nll(input: Dist.Distribution, target: torch.Tensor) -> torch.Tensor:
     """
     Computes the negative log likelihood loss from input distribution with respect to target.
     """
@@ -1770,12 +1770,12 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
                 "student_t": StudentTOutput,
                 "normal": NormalOutput,
                 "negative_binomial": NegativeBinomialOutput,
-                "gaussian_mixture": Gaussian_Mixture
+                "mixture": MixtureOutput
             }
             output_class = distribution_output_map.get(config.distribution_output, None)
             if output_class is not None:
                 self.distribution_output = output_class(dim=dim)
-                if self.distribution_output.distribution_class == MixtureSameFamily:
+                if self.distribution_output.distribution_class == Dist.MixtureSameFamily:
                     num_input_channels = config.num_input_channels
                     if config.prediction_channel_indices == None:
                         num_output_channels = 1
@@ -1783,6 +1783,7 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
                         num_output_channels = len(config.prediction_channel_indices)
                     self.distribution_output.set_mixture(
                         num_of_mixtures = config.num_of_mixtures,
+                        mixture_base = config.mixture_base,
                         num_input_channels = num_input_channels,
                         mixture_mean_reg = config.mixture_mean_reg,
                         mixture_var_reg = config.mixture_var_reg,
@@ -2163,7 +2164,7 @@ class TinyTimeMixerForMaskedPrediction(TinyTimeMixerForPrediction):
         )
 
 class AffineTransformed_Penalized(AffineTransformed):
-    def __init__(self, base_distribution: Distribution, loc=None, scale=None, event_dim=0, reg_mean=0.0, reg_var=0.0):
+    def __init__(self, base_distribution: Dist.Distribution, loc=None, scale=None, event_dim=0, reg_mean=0.0, reg_var=0.0):
         super().__init__(base_distribution, loc, scale, event_dim)
 
         self.reg_mean = reg_mean
@@ -2193,17 +2194,26 @@ class AffineTransformed_Penalized(AffineTransformed):
         return log_prob
 
 
-class Gaussian_Mixture(DistributionOutput):
+class MixtureOutput(DistributionOutput):
     
     args_dim: Dict[str, int] = {"loc": 1, "scale": 1}
-    distribution_class: type = MixtureSameFamily
+    distribution_class: type = Dist.MixtureSameFamily
 
-    def set_mixture(self,num_of_mixtures,num_input_channels=None,mixture_mean_reg=0.0,mixture_var_reg=0.0,enable_forecast_channel_mixing=True):
+    def set_mixture(self,num_of_mixtures,mixture_base,num_input_channels=None,mixture_mean_reg=0.0,mixture_var_reg=0.0,enable_forecast_channel_mixing=True):
         self.n_mixtures = num_of_mixtures
         self.dim_xin  = num_input_channels
         self.reg_mean = mixture_mean_reg
         self.reg_var = mixture_var_reg
         self.mix_channel = enable_forecast_channel_mixing
+
+        if mixture_base == 'normal':
+            print(f'Mixture of {num_of_mixtures} Normal distributions')
+            self.mixture_base = Dist.Normal
+        elif mixture_base == 'laplace':
+            print(f'Mixture of {num_of_mixtures} Laplace distributions')
+            self.mixture_base = Dist.Laplace
+        else:
+            print(f'mixture base distribution {mixture_base} is not set up')
 
     def get_parameter_projection(self, in_features: int) -> nn.Module:
         r"""
@@ -2217,21 +2227,21 @@ class Gaussian_Mixture(DistributionOutput):
 
     @classmethod
     def domain_map(cls, loc: torch.Tensor, scale: torch.Tensor, mix_weight: torch.Tensor):
-            scale = scale.exp() + 1.e-6
+            scale = scale.exp() + 1.e-8
             return loc.squeeze(-1), scale.squeeze(-1), mix_weight.squeeze(-1)
 
     def _base_distribution(self, distr_args):
-        mean = distr_args[0]
-        var  = distr_args[1]
-        mix  = distr_args[2]
+        loc   = distr_args[0]
+        scale = distr_args[1]
+        mix   = distr_args[2]
 
         mix = mix + 1/self.n_mixtures
         mix = mix/mix.sum(-1,keepdim=True)
 
-        weight = Categorical(probs=mix)
-        gaussians = Independent(Normal(mean,var),1)
+        weight = Dist.Categorical(probs=mix)
+        mixtures = Dist.Independent(self.mixture_base(loc,scale),1)
 
-        return self.distribution_class(weight,gaussians)
+        return self.distribution_class(weight,mixtures)
 
         
     def distribution(
@@ -2239,7 +2249,7 @@ class Gaussian_Mixture(DistributionOutput):
         distr_args,
         loc: Optional[torch.Tensor] = None,
         scale: Optional[torch.Tensor] = None,
-    ) -> Distribution:
+    ) -> Dist.Distribution:
         distr = self._base_distribution(distr_args)
         if loc is None and scale is None:
             return distr
@@ -2272,25 +2282,27 @@ class TTM_ParameterProjection(nn.Module):
                                         nn.Linear(2*in_features, out_features),
                                         nn.Sigmoid())
 
-        self.mean_net = nn.Linear(in_features,out_features)
-        self.var_net  = nn.Sequential(nn.Linear(   in_features,2* in_features),nn.SiLU(),
-                                      nn.Linear(2* in_features,2*out_features),nn.SiLU(),
-                                      nn.Linear(2*out_features,  out_features))
+        self.loc_net = nn.Sequential(nn.Linear(   in_features,2*out_features),nn.SiLU(),
+                                     nn.Linear(2*out_features,  out_features))
+        self.scale_net = nn.Sequential(nn.Linear(   in_features,2*out_features),nn.SiLU(),
+                                       nn.Linear(2*out_features,  out_features),nn.SiLU(),
+                                       nn.Linear(  out_features,  out_features))
 
         self.domain_map = LambdaLayer(gm_dist.domain_map)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor]:
 
+        nb = x.size(0) #batch size
+
         if self.mix_channel != None:
             x = self.mix_channel(x)
 
-        nb = x.size(0) #batch size
         mix_weight = self.mix_weight(x.mean(1)).reshape(nb,self.n_out,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
 
-        mean   = self.mean_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x number_of_mixtures
-        logvar = self. var_net(x.detach()).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x nmber_of_mixtures
+        loc   = self.  loc_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x number_of_mixtures
+        scale = self.scale_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x nmber_of_mixtures
 
-        return self.domain_map(mean,logvar,mix_weight)
+        return self.domain_map(loc,scale,mix_weight)
 
 
 class LambdaLayer(nn.Module):
