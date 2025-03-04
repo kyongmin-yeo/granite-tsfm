@@ -37,6 +37,12 @@ class TinyTimeMixerConfig(PretrainedConfig):
             Number of time steps to forecast for a forecasting task. Also known as the Forecast Horizon.
         num_parallel_samples (`int`, *optional*, defaults to 100):
             The number of samples to generate in parallel for probabilistic forecast.
+        num_of_mixtures ('int', *optional*, defaults to 10)
+            Number of mixture distributions
+        mixture_mean_reg ('float', *optional*, defaults to 0.1):
+            Regularization coefficient for the mean values of gaussian_mixture
+        mixture_var_reg ('float', *optional*, defaults to 1.e-4):
+            Regularization coefficient for precision (inverse of variance) of gaussian_mixture
         expansion_factor (`int`, *optional*, defaults to 2):
             Expansion factor to use inside MLP. Recommended range is 2-5. Larger value indicates more complex model.
         num_layers (`int`, *optional*, defaults to 3):
@@ -94,8 +100,8 @@ class TinyTimeMixerConfig(PretrainedConfig):
         head_dropout (`float`, *optional*, defaults to 0.2):
             The dropout probability the `TinyTimeMixer` head.
         distribution_output (`string`, *optional*, defaults to `"student_t"`):
-            The distribution emission head for the model when loss is "nll". Could be either "student_t", "normal" or
-            "negative_binomial".
+            The distribution emission head for the model when loss is "nll". Could be either "student_t", "normal",
+            "negative_binomial","gaussian_mixture".
         prediction_channel_indices (`list`, *optional*):
             List of channel indices to forecast. If None, forecast all channels. Target data is expected to have all
             channels and we explicitly filter the channels in prediction and target before loss computation. Please provide the indices
@@ -190,6 +196,9 @@ class TinyTimeMixerConfig(PretrainedConfig):
         head_dropout: float = 0.2,
         distribution_output: str = "student_t",
         num_parallel_samples: int = 100,
+        num_of_mixtures: int = 4,
+        mixture_mean_reg: float = 1.e-2,
+        mixture_var_reg: float = 1.e-4,
         # decoder parameters
         decoder_num_layers: int = 8,
         decoder_d_model: int = 8,
@@ -243,6 +252,9 @@ class TinyTimeMixerConfig(PretrainedConfig):
         self.loss = loss
         self.num_parallel_samples = num_parallel_samples
         self.norm_eps = norm_eps
+        self.num_of_mixtures = num_of_mixtures
+        self.mixture_mean_reg = mixture_mean_reg
+        self.mixture_var_reg = mixture_var_reg
 
         self.use_decoder = use_decoder
 

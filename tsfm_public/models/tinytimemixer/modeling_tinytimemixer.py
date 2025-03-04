@@ -7,15 +7,17 @@
 import copy
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Callable, Dict
 
 import torch
 import torch.nn as nn
 from transformers.modeling_utils import PreTrainedModel
 from transformers.time_series_utils import (
+    AffineTransformed,
+    DistributionOutput,
     NegativeBinomialOutput,
     NormalOutput,
-    StudentTOutput,
+    StudentTOutput
 )
 from transformers.utils import (
     ModelOutput,
@@ -24,6 +26,7 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
+from torch.distributions import Distribution,MixtureSameFamily,Categorical,Normal,Independent
 
 from .configuration_tinytimemixer import TinyTimeMixerConfig
 
@@ -1157,7 +1160,7 @@ class TinyTimeMixerForPredictionHead(nn.Module):
         hidden_features = self.dropout_layer(hidden_features)  # [batch_size x n_vars x num_patch * d_model]
         forecast = self.base_forecast_block(hidden_features)  # [batch_size x n_vars x prediction_length]
         if isinstance(forecast, tuple):
-            forecast = tuple(z.transpose(-1, -2) for z in forecast)
+            forecast = tuple(z.transpose(-1, -2) if i < 2 else z for i,z in enumerate(forecast))
         else:
             forecast = forecast.transpose(-1, -2)  # [batch_size x prediction_length x n_vars]
 
@@ -1767,10 +1770,24 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
                 "student_t": StudentTOutput,
                 "normal": NormalOutput,
                 "negative_binomial": NegativeBinomialOutput,
+                "gaussian_mixture": Gaussian_Mixture
             }
             output_class = distribution_output_map.get(config.distribution_output, None)
             if output_class is not None:
                 self.distribution_output = output_class(dim=dim)
+                if self.distribution_output.distribution_class == MixtureSameFamily:
+                    num_input_channels = config.num_input_channels
+                    if config.prediction_channel_indices == None:
+                        num_output_channels = 1
+                    else:
+                        num_output_channels = len(config.prediction_channel_indices)
+                    self.distribution_output.set_mixture(
+                        num_of_mixtures = config.num_of_mixtures,
+                        num_input_channels = num_input_channels,
+                        mixture_mean_reg = config.mixture_mean_reg,
+                        mixture_var_reg = config.mixture_var_reg,
+                        enable_forecast_channel_mixing = config.enable_forecast_channel_mixing
+                    )
             else:
                 raise ValueError(f"Unknown distribution output {config.distribution_output}")
 
@@ -1859,9 +1876,9 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
         elif self.loss == "huber":
             loss = nn.HuberLoss(delta=self.config.huber_delta)
         elif self.loss == "nll":
-            raise Exception(
-                "NLL loss and Distribution heads are currently not allowed. Use mse or mae as loss functions."
-            )
+            #raise Exception(
+            #    "NLL loss and Distribution heads are currently not allowed. Use mse or mae as loss functions."
+            #)
             loss = nll
         elif self.loss is None:
             loss = None
@@ -1950,7 +1967,11 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
                     # select only values of loss where entire timepoint is observed
                     loss_val = loss_val[fut_mask_bool.all(dim=-1)]
                 else:
-                    loss_val = loss(distribution, future_values)
+                    if self.loss =='mse':
+                        y_hat = distribution.mean
+                        loss_val = loss(y_hat, future_values)
+                    else:
+                        loss_val = loss(distribution, future_values)
                 loss_val = weighted_average(loss_val)
         else:
             y_hat = y_hat * scale + loc
@@ -2140,3 +2161,144 @@ class TinyTimeMixerForMaskedPrediction(TinyTimeMixerForPrediction):
             static_categorical_values=static_categorical_values,
             # metadata = metadata
         )
+
+class AffineTransformed_Penalized(AffineTransformed):
+    def __init__(self, base_distribution: Distribution, loc=None, scale=None, event_dim=0, reg_mean=0.0, reg_var=0.0):
+        super().__init__(base_distribution, loc, scale, event_dim)
+
+        self.reg_mean = reg_mean
+        self.reg_var  = reg_var
+    
+    def log_prob(self,x):
+        #first original log likelihood
+        log_prob = super().log_prob(x)
+
+        #add penalty functions
+        if self.reg_mean > 0.0:
+            mse = (x-self.mean).pow(2).sum(-1)
+            log_prob = log_prob - mse*self.reg_mean*1.e2
+
+            component_mean = self.base_dist.component_distribution.mean
+
+            xx = (x-self.loc)/self.scale
+            xx = x.unsqueeze(-2)
+
+            log_prob = log_prob - (xx-component_mean).pow(2).mean(-2).sum(-1)*self.reg_mean
+
+        if self.reg_var > 0.0:
+            component_var = self.base_dist.component_distribution.variance
+
+            log_prob = log_prob - (1/component_var).sum(-2).mean(-1)*self.reg_var
+
+        return log_prob
+
+
+class Gaussian_Mixture(DistributionOutput):
+    
+    args_dim: Dict[str, int] = {"loc": 1, "scale": 1}
+    distribution_class: type = MixtureSameFamily
+
+    def set_mixture(self,num_of_mixtures,num_input_channels=None,mixture_mean_reg=0.0,mixture_var_reg=0.0,enable_forecast_channel_mixing=True):
+        self.n_mixtures = num_of_mixtures
+        self.dim_xin  = num_input_channels
+        self.reg_mean = mixture_mean_reg
+        self.reg_var = mixture_var_reg
+        self.mix_channel = enable_forecast_channel_mixing
+
+    def get_parameter_projection(self, in_features: int) -> nn.Module:
+        r"""
+        Return the parameter projection layer that maps the input to the appropriate parameters of the distribution.
+        """
+        return TTM_ParameterProjection(
+            gm_dist = self,
+            in_features=in_features,
+        )
+
+
+    @classmethod
+    def domain_map(cls, loc: torch.Tensor, scale: torch.Tensor, mix_weight: torch.Tensor):
+            scale = scale.exp() + 1.e-6
+            return loc.squeeze(-1), scale.squeeze(-1), mix_weight.squeeze(-1)
+
+    def _base_distribution(self, distr_args):
+        mean = distr_args[0]
+        var  = distr_args[1]
+        mix  = distr_args[2]
+
+        mix = mix + 1/self.n_mixtures
+        mix = mix/mix.sum(-1,keepdim=True)
+
+        weight = Categorical(probs=mix)
+        gaussians = Independent(Normal(mean,var),1)
+
+        return self.distribution_class(weight,gaussians)
+
+        
+    def distribution(
+        self,
+        distr_args,
+        loc: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
+    ) -> Distribution:
+        distr = self._base_distribution(distr_args)
+        if loc is None and scale is None:
+            return distr
+        else:
+            return AffineTransformed_Penalized(distr, loc=loc, scale=scale, event_dim=self.event_dim, reg_mean=self.reg_mean,reg_var=self.reg_var)
+
+
+class TTM_ParameterProjection(nn.Module):
+    def __init__(
+        self,gm_dist: DistributionOutput, in_features: int, **kwargs
+    ) -> None:
+        super().__init__(**kwargs)
+
+        #input from TTM decoder: [batch_size x n_vars x num_patch * d_model]
+        #in_features  = num_patch * d_model
+
+        self.n_mix = gm_dist.n_mixtures
+        self.n_out = gm_dist.dim
+        out_features = self.n_out*self.n_mix
+
+        if (gm_dist.dim_xin != None) and gm_dist.mix_channel:
+            nvar  = gm_dist.dim_xin
+            self.mix_channel = nn.Sequential(nn.Conv1d(  nvar,4*nvar,1),nn.SiLU(),
+                                             nn.Conv1d(4*nvar,4*nvar,1),nn.SiLU(),
+                                             nn.Conv1d(4*nvar,  nvar,1))
+        else:
+            self.mix_channel = None
+
+        self.mix_weight = nn.Sequential(nn.Linear(  in_features,2*in_features),nn.SiLU(),
+                                        nn.Linear(2*in_features, out_features),
+                                        nn.Sigmoid())
+
+        self.mean_net = nn.Linear(in_features,out_features)
+        self.var_net  = nn.Sequential(nn.Linear(   in_features,2* in_features),nn.SiLU(),
+                                      nn.Linear(2* in_features,2*out_features),nn.SiLU(),
+                                      nn.Linear(2*out_features,  out_features))
+
+        self.domain_map = LambdaLayer(gm_dist.domain_map)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor]:
+
+        if self.mix_channel != None:
+            x = self.mix_channel(x)
+
+        nb = x.size(0) #batch size
+        mix_weight = self.mix_weight(x.mean(1)).reshape(nb,self.n_out,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
+
+        mean   = self.mean_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x number_of_mixtures
+        logvar = self. var_net(x.detach()).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x nmber_of_mixtures
+
+        return self.domain_map(mean,logvar,mix_weight)
+
+
+class LambdaLayer(nn.Module):
+    def __init__(self, function):
+        super().__init__()
+        self.function = function
+
+    def forward(self, x, *args):
+        return self.function(x, *args)
+
+
