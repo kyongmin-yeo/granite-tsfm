@@ -1784,6 +1784,7 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
                     self.distribution_output.set_mixture(
                         num_of_mixtures = config.num_of_mixtures,
                         mixture_base = config.mixture_base,
+                        mixture_mode = config.mixture_mode,
                         num_input_channels = num_input_channels,
                         mixture_mean_reg = config.mixture_mean_reg,
                         mixture_var_reg = config.mixture_var_reg,
@@ -2199,12 +2200,14 @@ class MixtureOutput(DistributionOutput):
     args_dim: Dict[str, int] = {"loc": 1, "scale": 1}
     distribution_class: type = Dist.MixtureSameFamily
 
-    def set_mixture(self,num_of_mixtures,mixture_base,num_input_channels=None,mixture_mean_reg=0.0,mixture_var_reg=0.0,enable_forecast_channel_mixing=True):
+    def set_mixture(self,num_of_mixtures,mixture_base,mixture_mode='small',num_input_channels=None,mixture_mean_reg=0.0,mixture_var_reg=0.0,enable_forecast_channel_mixing=True):
         self.n_mixtures = num_of_mixtures
         self.dim_xin  = num_input_channels
         self.reg_mean = mixture_mean_reg
         self.reg_var = mixture_var_reg
         self.mix_channel = enable_forecast_channel_mixing
+
+        self.mixture_mode = mixture_mode
 
         if mixture_base == 'normal':
             print(f'Mixture of {num_of_mixtures} Normal distributions')
@@ -2278,15 +2281,18 @@ class TTM_ParameterProjection(nn.Module):
         else:
             self.mix_channel = None
 
-        self.mix_weight = nn.Sequential(nn.Linear(  in_features,2*in_features),nn.SiLU(),
-                                        nn.Linear(2*in_features, out_features),
-                                        nn.Sigmoid())
+        if gm_dist.mixture_mode == 'small':
+            self.mix_weight = nn.Sequential(nn.Linear(in_features,in_features),nn.SiLU(),
+                                            nn.Linear(in_features,self.n_mix),
+                                            nn.Sigmoid())
+        else:
+            self.mix_weight = nn.Sequential(nn.Linear(in_features, in_features),nn.SiLU(),
+                                            nn.Linear(in_features,out_features),
+                                            nn.Sigmoid())
 
-        self.loc_net = nn.Sequential(nn.Linear(   in_features,2*out_features),nn.SiLU(),
-                                     nn.Linear(2*out_features,  out_features))
-        self.scale_net = nn.Sequential(nn.Linear(   in_features,2*out_features),nn.SiLU(),
-                                       nn.Linear(2*out_features,  out_features),nn.SiLU(),
-                                       nn.Linear(  out_features,  out_features))
+        self.loc_net = nn.Linear(in_features,out_features)
+        self.scale_net = nn.Sequential(nn.Linear( in_features,out_features),nn.SiLU(),
+                                       nn.Linear(out_features,out_features))
 
         self.domain_map = LambdaLayer(gm_dist.domain_map)
 
@@ -2297,7 +2303,7 @@ class TTM_ParameterProjection(nn.Module):
         if self.mix_channel != None:
             x = self.mix_channel(x)
 
-        mix_weight = self.mix_weight(x.mean(1)).reshape(nb,self.n_out,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
+        mix_weight = self.mix_weight(x).mean(1).reshape(nb,-1,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
 
         loc   = self.  loc_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x number_of_mixtures
         scale = self.scale_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x nmber_of_mixtures

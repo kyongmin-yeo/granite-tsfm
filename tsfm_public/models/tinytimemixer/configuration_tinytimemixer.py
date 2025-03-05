@@ -41,6 +41,8 @@ class TinyTimeMixerConfig(PretrainedConfig):
             Number of mixture distributions
         mixture_base ('str', *optional*, defaults to 'laplace'):
             Base distribution of mixtures. either 'laplace' or 'normal'
+        mixture_mode ('str', *optional*, defaults to 'small'):
+            Using reduced  or full mixtures. either 'small' or 'full'
         mixture_mean_reg ('float', *optional*, defaults to 0.1):
             Regularization coefficient for the mean values of mixture distribution
         mixture_var_reg ('float', *optional*, defaults to 1.e-4):
@@ -200,6 +202,7 @@ class TinyTimeMixerConfig(PretrainedConfig):
         num_parallel_samples: int = 100,
         num_of_mixtures: int = 4,
         mixture_base: str = 'laplace',
+        mixture_mode: str = 'small',
         mixture_mean_reg: float = 1.e-3,
         mixture_var_reg: float = 1.e-6,
         # decoder parameters
@@ -257,6 +260,7 @@ class TinyTimeMixerConfig(PretrainedConfig):
         self.norm_eps = norm_eps
         self.num_of_mixtures = num_of_mixtures
         self.mixture_base = mixture_base
+        self.mixture_mode = mixture_mode
         self.mixture_mean_reg = mixture_mean_reg
         self.mixture_var_reg = mixture_var_reg
 
