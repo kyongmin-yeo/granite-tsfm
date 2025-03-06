@@ -2244,17 +2244,17 @@ class AffineTransformed_Penalized(AffineTransformed):
         #add penalty functions
         if self.reg_mean > 0.0:
             component_mean = self.base_dist.component_distribution.mean
+            component_mean = component_mean*self.scale.unsqueeze(-2)+self.loc.unsqueeze(-2)
 
-            xx = (x-self.loc)/self.scale
             xx = x.unsqueeze(-2)
 
             log_prob = log_prob - (xx-component_mean).pow(2).mean((-2,-1))*self.reg_mean
 
         if self.reg_var > 0.0:
-            component_std = self.base_dist.component_distribution.stddev
+            component_std = self.base_dist.component_distribution.stddev*self.scale.unsqueeze(-2)
 
             log_prob = log_prob - (1/component_std).mean((-2,-1))*self.reg_var
-            log_prob = log_prob - component_std.mean((-2,-1))*self.reg_var*1.e2
+            log_prob = log_prob - (  component_std).mean((-2,-1))*self.reg_var*1.e2
 
         return log_prob
 
@@ -2302,8 +2302,8 @@ class MixtureOutput(DistributionOutput):
         scale = distr_args[1]
         mix   = distr_args[2]
 
-        mix = mix + 1/self.n_mixtures
-        mix = mix/mix.sum(-1,keepdim=True)
+        mix = nn.functional.softmax(mix,dim=-1) + 0.1/self.n_mixtures
+
         if self.mixture_mode == 'small':
             mix = mix.repeat_interleave(loc.size(1),dim=1) #repeat along time
 
@@ -2349,12 +2349,10 @@ class TTM_ParameterProjection(nn.Module):
 
         if gm_dist.mixture_mode == 'small':
             self.mix_weight = nn.Sequential(nn.Linear(in_features,in_features),nn.SiLU(),
-                                            nn.Linear(in_features,self.n_mix),
-                                            nn.Sigmoid())
+                                            nn.Linear(in_features,self.n_mix))
         else:
             self.mix_weight = nn.Sequential(nn.Linear(in_features, in_features),nn.SiLU(),
-                                            nn.Linear(in_features,out_features),
-                                            nn.Sigmoid())
+                                            nn.Linear(in_features,out_features))
 
         self.loc_net = nn.Linear(in_features,out_features)
         self.scale_net = nn.Sequential(nn.Linear( in_features,out_features),nn.SiLU(),
