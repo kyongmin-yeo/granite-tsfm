@@ -1697,6 +1697,18 @@ class SampleTinyTimeMixerPredictionOutput(ModelOutput):
 
     sequences: torch.FloatTensor = None
 
+@dataclass
+class QuantileTinyTimeMixerPredictionOutput(ModelOutput):
+    """
+    Base class for time series model's predictions outputs that contains the quantile values from the chosen
+    distribution.
+
+    Args:
+        sequences (`torch.FloatTensor` of shape `(batch_size, num_quantiles, prediction_length, number_channels)`):
+            Quantile values from the chosen distribution.
+    """
+
+    sequences: torch.FloatTensor = None
 
 def nll(input: Dist.Distribution, target: torch.Tensor) -> torch.Tensor:
     """
@@ -1975,6 +1987,7 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
                     else:
                         loss_val = loss(distribution, future_values)
                 loss_val = weighted_average(loss_val)
+            self.pred_distribution = distribution
         else:
             y_hat = y_hat * scale + loc
             if future_values is not None and return_loss is True and loss is not None:
@@ -2011,6 +2024,7 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
     def generate(
         self,
         past_values: torch.Tensor,
+        num_parallel_samples: Optional[int] = None,
         past_observed_mask: Optional[torch.Tensor] = None,
     ) -> SampleTinyTimeMixerPredictionOutput:
         """
@@ -2019,6 +2033,9 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
         Args:
             past_values (`torch.FloatTensor` of shape `(batch_size, sequence_length, num_input_channels)`):
                 Past values of the time series that serves as context in order to predict the future.
+
+            num_parallel_samples (int, *optional*):
+                number of Monte Carlo samples. If None, the sample size predefined in config is used
 
             past_observed_mask (`torch.Tensor` of shape `(batch_size, sequence_length, num_input_channels)`, *optional*):
                 Boolean mask to indicate which `past_values` were observed and which were missing. Mask values selected
@@ -2031,7 +2048,8 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
             number of samples, prediction_length, num_input_channels)`.
         """
         # get number of samples
-        num_parallel_samples = self.num_parallel_samples
+        if num_parallel_samples == None:
+            num_parallel_samples = self.num_parallel_samples
 
         # get model output
         outputs = self(
@@ -2043,9 +2061,10 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
 
         # get distribution
 
-        distribution = self.distribution_output.distribution(
-            outputs.prediction_outputs, loc=outputs.loc, scale=outputs.scale
-        )
+        #distribution = self.distribution_output.distribution(
+        #    outputs.prediction_outputs, loc=outputs.loc, scale=outputs.scale
+        #)
+        distribution = self.pred_distribution
 
         # get samples: list of [batch_size x prediction_length x num_channels]
         samples = [distribution.sample() for _ in range(num_parallel_samples)]
@@ -2053,6 +2072,48 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
         # stack tensors
         samples = torch.stack(samples, dim=1)  # [batch_size x num_samples x prediction_length x num_channels]
         return SampleTinyTimeMixerPredictionOutput(sequences=samples)
+
+    def predict_quantile(
+        self,
+        quantiles: list,
+        past_values: torch.Tensor,
+        past_observed_mask: Optional[torch.Tensor] = None,
+        num_parallel_samples: Optional[int] = 500,
+    ) -> QuantileTinyTimeMixerPredictionOutput:
+        """
+        Generate sequences of predictoin quantiles from a model with a probability distribution head.
+
+        Args:
+            quantiles (list of float):
+                quantiles of the predictive distribution, e.g., [0.025,0.975] for 95% prediction interval
+
+            past_values (`torch.FloatTensor` of shape `(batch_size, sequence_length, num_input_channels)`):
+                Past values of the time series that serves as context in order to predict the future.
+
+            past_observed_mask (`torch.Tensor` of shape `(batch_size, sequence_length, num_input_channels)`, *optional*):
+                Boolean mask to indicate which `past_values` were observed and which were missing. Mask values selected
+                in `[0, 1]` or `[False, True]`:
+                    - 1 or True for values that are **observed**,
+                    - 0 or False for values that are **missing** (i.e. NaNs that were replaced by zeros).
+
+            num_parallel_samples (int, *optional* default is 500):
+                number of Monte Carlo samples. If None, the sample size predefined in config is used.
+
+        Return:
+            [`QuantileTinyTimeMixerPredictionOutput`] where the outputs `sequences` tensor will have shape `(batch_size,
+            number of quantiles, prediction_length, num_input_channels)`.
+        """
+        # get number of samples
+        if num_parallel_samples == None:
+            num_parallel_samples = self.num_parallel_samples
+
+        MC_Samples = self.generate(past_values=past_values,num_parallel_samples=num_parallel_samples,past_observed_mask=past_observed_mask)
+
+        qt_in = torch.tensor(quantiles,device=past_values.device)
+        out = MC_Samples.sequences.quantile(qt_in,dim=1) #[num_quantiles x batch_size x prediction_length x num_channels]
+        out = out.transpose(0,1) #[batch_size x num_quantiles x prediction_length x num_channels]
+
+        return QuantileTinyTimeMixerPredictionOutput(sequences=out)
 
 
 class TinyTimeMixerForMaskedPrediction(TinyTimeMixerForPrediction):
@@ -2175,22 +2236,28 @@ class AffineTransformed_Penalized(AffineTransformed):
         #first original log likelihood
         log_prob = super().log_prob(x)
 
+        #moment matching regularization
+        NLL = (x-self.mean).pow(2)/self.variance + self.variance.log()
+        log_prob = log_prob - NLL.sum(-1)
+
+        #mse = (x-self.mean).pow(2)[:,0,0].mean(0)
+        #var = self.variance[:,0,0].mean(0)
+        #print(f'mse {mse}')
+        #print(f'var {var}')
+
         #add penalty functions
         if self.reg_mean > 0.0:
-            mse = (x-self.mean).pow(2).sum(-1)
-            log_prob = log_prob - mse*self.reg_mean*1.e2
-
             component_mean = self.base_dist.component_distribution.mean
 
             xx = (x-self.loc)/self.scale
             xx = x.unsqueeze(-2)
 
-            log_prob = log_prob - (xx-component_mean).pow(2).mean(-2).sum(-1)*self.reg_mean
+            log_prob = log_prob - (xx-component_mean).pow(2).mean((-2,-1))*self.reg_mean
 
         if self.reg_var > 0.0:
             component_var = self.base_dist.component_distribution.variance
 
-            log_prob = log_prob - (1/component_var).sum(-2).mean(-1)*self.reg_var
+            log_prob = log_prob - (1/component_var).mean((-2,-1))*self.reg_var
 
         return log_prob
 
@@ -2200,7 +2267,7 @@ class MixtureOutput(DistributionOutput):
     args_dim: Dict[str, int] = {"loc": 1, "scale": 1}
     distribution_class: type = Dist.MixtureSameFamily
 
-    def set_mixture(self,num_of_mixtures,mixture_base,mixture_mode='small',num_input_channels=None,mixture_mean_reg=0.0,mixture_var_reg=0.0,enable_forecast_channel_mixing=True):
+    def set_mixture(self,num_of_mixtures,mixture_base,mixture_mode='full',num_input_channels=None,mixture_mean_reg=0.0,mixture_var_reg=0.0,enable_forecast_channel_mixing=True):
         self.n_mixtures = num_of_mixtures
         self.dim_xin  = num_input_channels
         self.reg_mean = mixture_mean_reg
@@ -2230,7 +2297,7 @@ class MixtureOutput(DistributionOutput):
 
     @classmethod
     def domain_map(cls, loc: torch.Tensor, scale: torch.Tensor, mix_weight: torch.Tensor):
-            scale = scale.exp() + 1.e-8
+            scale = scale.exp() + 1.e-6
             return loc.squeeze(-1), scale.squeeze(-1), mix_weight.squeeze(-1)
 
     def _base_distribution(self, distr_args):
@@ -2240,6 +2307,8 @@ class MixtureOutput(DistributionOutput):
 
         mix = mix + 1/self.n_mixtures
         mix = mix/mix.sum(-1,keepdim=True)
+        if self.mixture_mode == 'small':
+            mix = mix.repeat_interleave(loc.size(1),dim=1) #repeat along time
 
         weight = Dist.Categorical(probs=mix)
         mixtures = Dist.Independent(self.mixture_base(loc,scale),1)
@@ -2290,7 +2359,8 @@ class TTM_ParameterProjection(nn.Module):
                                             nn.Linear(in_features,out_features),
                                             nn.Sigmoid())
 
-        self.loc_net = nn.Linear(in_features,out_features)
+        self.loc_net = nn.Sequential(nn.Linear( in_features,out_features),nn.SiLU(),
+                                     nn.Linear(out_features,out_features))
         self.scale_net = nn.Sequential(nn.Linear( in_features,out_features),nn.SiLU(),
                                        nn.Linear(out_features,out_features))
 
