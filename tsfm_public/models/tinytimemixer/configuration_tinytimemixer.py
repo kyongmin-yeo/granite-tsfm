@@ -203,7 +203,7 @@ class TinyTimeMixerConfig(PretrainedConfig):
         num_of_mixtures: int = 4,
         mixture_base: str = 'laplace',
         mixture_mode: str = 'small',
-        mixture_mean_reg: float = 1.e-3,
+        mixture_mean_reg: float = 1.e-4,
         mixture_var_reg: float = 1.e-3,
         # decoder parameters
         decoder_num_layers: int = 8,

@@ -2068,10 +2068,7 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
         distribution = self.pred_distribution
 
         # get samples: list of [batch_size x prediction_length x num_channels]
-        samples = [distribution.sample() for _ in range(num_parallel_samples)]
-
-        # stack tensors
-        samples = torch.stack(samples, dim=1)  # [batch_size x num_samples x prediction_length x num_channels]
+        samples = distribution.sample((num_parallel_samples,)).transpose(0,1) # [batch_size x num_samples x prediction_length x num_channels]
         return SampleTinyTimeMixerPredictionOutput(sequences=samples)
 
     def predict_quantile(
