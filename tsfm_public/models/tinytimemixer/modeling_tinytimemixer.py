@@ -2241,11 +2241,6 @@ class AffineTransformed_Penalized(AffineTransformed):
         NLL = (x-self.mean).pow(2)/self.variance + self.variance.log()
         log_prob = log_prob - NLL.sum(-1)
 
-        #mse = (x-self.mean).pow(2)[:,0,0].mean(0)
-        #var = self.variance[:,0,0].mean(0)
-        #print(f'mse {mse}')
-        #print(f'var {var}')
-
         #add penalty functions
         if self.reg_mean > 0.0:
             component_mean = self.base_dist.component_distribution.mean
@@ -2256,9 +2251,10 @@ class AffineTransformed_Penalized(AffineTransformed):
             log_prob = log_prob - (xx-component_mean).pow(2).mean((-2,-1))*self.reg_mean
 
         if self.reg_var > 0.0:
-            component_var = self.base_dist.component_distribution.variance
+            component_std = self.base_dist.component_distribution.stddev
 
-            log_prob = log_prob - (1/component_var).mean((-2,-1))*self.reg_var
+            log_prob = log_prob - (1/component_std).mean((-2,-1))*self.reg_var
+            log_prob = log_prob - component_std.mean((-2,-1))*self.reg_var*1.e2
 
         return log_prob
 
@@ -2373,10 +2369,10 @@ class TTM_ParameterProjection(nn.Module):
         if self.mix_channel != None:
             x = self.mix_channel(x)
 
-        mix_weight = self.mix_weight(x.detach()).mean(1).reshape(nb,-1,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
+        mix_weight = self.mix_weight(x).mean(1).reshape(nb,-1,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
 
         loc   = self.  loc_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x number_of_mixtures
-        scale = self.scale_net(x.detach()).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x nmber_of_mixtures
+        scale = self.scale_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x nmber_of_mixtures
 
         return self.domain_map(loc,scale,mix_weight)
 
