@@ -17,7 +17,8 @@ from transformers.time_series_utils import (
     DistributionOutput,
     NegativeBinomialOutput,
     NormalOutput,
-    StudentTOutput
+    StudentTOutput,
+    LambdaLayer
 )
 from transformers.utils import (
     ModelOutput,
@@ -2359,8 +2360,7 @@ class TTM_ParameterProjection(nn.Module):
                                             nn.Linear(in_features,out_features),
                                             nn.Sigmoid())
 
-        self.loc_net = nn.Sequential(nn.Linear( in_features,out_features),nn.SiLU(),
-                                     nn.Linear(out_features,out_features))
+        self.loc_net = nn.Linear(in_features,out_features)
         self.scale_net = nn.Sequential(nn.Linear( in_features,out_features),nn.SiLU(),
                                        nn.Linear(out_features,out_features))
 
@@ -2373,20 +2373,10 @@ class TTM_ParameterProjection(nn.Module):
         if self.mix_channel != None:
             x = self.mix_channel(x)
 
-        mix_weight = self.mix_weight(x).mean(1).reshape(nb,-1,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
+        mix_weight = self.mix_weight(x.detach()).mean(1).reshape(nb,-1,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
 
         loc   = self.  loc_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x number_of_mixtures
-        scale = self.scale_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x nmber_of_mixtures
+        scale = self.scale_net(x.detach()).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x nmber_of_mixtures
 
         return self.domain_map(loc,scale,mix_weight)
-
-
-class LambdaLayer(nn.Module):
-    def __init__(self, function):
-        super().__init__()
-        self.function = function
-
-    def forward(self, x, *args):
-        return self.function(x, *args)
-
 
