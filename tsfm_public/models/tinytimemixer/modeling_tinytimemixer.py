@@ -2235,23 +2235,24 @@ class AffineTransformed_Penalized(AffineTransformed):
         log_prob = super().log_prob(x)
 
         #moment matching regularization
-        NLL = (x-self.mean).pow(2)/self.variance + self.variance.log()
-        log_prob = log_prob - NLL.sum(-1)
+        #NLL = (x-self.mean).pow(2)/self.variance + self.variance.log()
+        #log_prob = log_prob - NLL.sum(-1)*0.1
+        log_prob = log_prob - (x-self.mean).pow(2).sum(-1)*0.1
 
         #add penalty functions
         if self.reg_mean > 0.0:
             component_mean = self.base_dist.component_distribution.mean
-            component_mean = component_mean*self.scale.unsqueeze(-2)+self.loc.unsqueeze(-2)
 
-            xx = x.unsqueeze(-2)
+            xx = (x-self.loc)/self.scale
+            xx = xx.unsqueeze(-2)
 
             log_prob = log_prob - (xx-component_mean).pow(2).mean((-2,-1))*self.reg_mean
 
         if self.reg_var > 0.0:
-            component_std = self.base_dist.component_distribution.stddev*self.scale.unsqueeze(-2)
+            component_var = self.base_dist.component_distribution.variance
 
-            log_prob = log_prob - (1/component_std).mean((-2,-1))*self.reg_var
-            log_prob = log_prob - (  component_std).mean((-2,-1))*self.reg_var*1.e2
+            #log_prob = log_prob - (1/component_var).mean((-2,-1))*self.reg_var
+            log_prob = log_prob - (  component_var).mean((-2,-1))*self.reg_var*1.e2
 
         return log_prob
 
@@ -2299,7 +2300,7 @@ class MixtureOutput(DistributionOutput):
         scale = distr_args[1]
         mix   = distr_args[2]
 
-        mix = nn.functional.softmax(mix,dim=-1) + 0.1/self.n_mixtures
+        mix = nn.functional.softmax(mix,dim=-1) #+ 0.1/self.n_mixtures
 
         if self.mixture_mode == 'small':
             mix = mix.repeat_interleave(loc.size(1),dim=1) #repeat along time
@@ -2345,15 +2346,20 @@ class TTM_ParameterProjection(nn.Module):
             self.mix_channel = None
 
         if gm_dist.mixture_mode == 'small':
-            self.mix_weight = nn.Sequential(nn.Linear(in_features,in_features),nn.SiLU(),
-                                            nn.Linear(in_features,self.n_mix))
+            #self.mix_weight = nn.Sequential(nn.Linear(in_features,in_features),nn.SiLU(),
+            #                                nn.Linear(in_features,self.n_mix))
+            self.mix_weight = nn.Sequential(nn.Linear(in_features,128),nn.SiLU(),
+                                            nn.Linear(128,self.n_mix))
+                                            
         else:
             self.mix_weight = nn.Sequential(nn.Linear(in_features, in_features),nn.SiLU(),
                                             nn.Linear(in_features,out_features))
 
         self.loc_net = nn.Linear(in_features,out_features)
-        self.scale_net = nn.Sequential(nn.Linear( in_features,out_features),nn.SiLU(),
-                                       nn.Linear(out_features,out_features))
+        #self.loc_net   = nn.Sequential(nn.Linear(in_features, in_features),nn.SiLU(),
+        #                               nn.Linear(in_features,out_features))
+        self.scale_net = nn.Sequential(nn.Linear(in_features, in_features),nn.SiLU(),
+                                       nn.Linear(in_features,out_features))
 
         self.domain_map = LambdaLayer(gm_dist.domain_map)
 
@@ -2364,10 +2370,12 @@ class TTM_ParameterProjection(nn.Module):
         if self.mix_channel != None:
             x = self.mix_channel(x)
 
-        mix_weight = self.mix_weight(x).mean(1).reshape(nb,-1,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
 
-        loc   = self.  loc_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x number_of_mixtures
+        loc = self.loc_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x number_of_mixtures
+
+        x = x.detach()
         scale = self.scale_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x nmber_of_mixtures
+        mix_weight = self.mix_weight(x).mean(1).reshape(nb,-1,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
 
         return self.domain_map(loc,scale,mix_weight)
 
