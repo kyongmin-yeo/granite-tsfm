@@ -195,7 +195,7 @@ class TinyTimeMixerPositionalEncoding(nn.Module):
 
     @staticmethod
     def _init_pe(config: TinyTimeMixerConfig) -> nn.Parameter:
-        # Positional encoding
+        # Positional esncoding
         if config.positional_encoding_type == "random":
             position_enc = nn.Parameter(torch.randn(config.num_patches, config.d_model), requires_grad=True)
         elif config.positional_encoding_type == "sincos":
@@ -2292,7 +2292,7 @@ class MixtureOutput(DistributionOutput):
 
     @classmethod
     def domain_map(cls, loc: torch.Tensor, scale: torch.Tensor, mix_weight: torch.Tensor):
-            scale = scale.exp() + 1.e-6
+            scale = scale.exp() + 1.e-3
             return loc.squeeze(-1), scale.squeeze(-1), mix_weight.squeeze(-1)
 
     def _base_distribution(self, distr_args):
@@ -2300,7 +2300,7 @@ class MixtureOutput(DistributionOutput):
         scale = distr_args[1]
         mix   = distr_args[2]
 
-        mix = nn.functional.softmax(mix,dim=-1) #+ 0.1/self.n_mixtures
+        mix = nn.functional.softmax(mix,dim=-1) + 0.1/self.n_mixtures
 
         if self.mixture_mode == 'small':
             mix = mix.repeat_interleave(loc.size(1),dim=1) #repeat along time
@@ -2345,37 +2345,54 @@ class TTM_ParameterProjection(nn.Module):
         else:
             self.mix_channel = None
 
+        self.mixture_mode = gm_dist.mixture_mode
+
         if gm_dist.mixture_mode == 'small':
             self.mix_weight = nn.Sequential(nn.Linear(in_features,in_features),nn.SiLU(),
                                             nn.Linear(in_features,self.n_mix))
-            #self.mix_weight = nn.Sequential(nn.Linear(in_features,128),nn.SiLU(),
-            #                                nn.Linear(128,self.n_mix))
-                                            
         else:
             self.mix_weight = nn.Sequential(nn.Linear(in_features, in_features),nn.SiLU(),
                                             nn.Linear(in_features,out_features))
 
-        self.loc_net = nn.Linear(in_features,out_features)
-        #self.loc_net   = nn.Sequential(nn.Linear(in_features, in_features),nn.SiLU(),
-        #                               nn.Linear(in_features,out_features))
-        self.scale_net = nn.Sequential(nn.Linear(in_features, in_features),nn.SiLU(),
-                                       nn.Linear(in_features,out_features))
+        self.encoder = nn.Linear(in_features,out_features)
+
+        self.loc_net = nn.Conv1d(self.n_mix,self.n_mix,3,padding='same')
+        self.scale_net = nn.Sequential(nn.Conv1d(  self.n_mix,2*self.n_mix,3,padding='same'),nn.SiLU(),
+                                       nn.Conv1d(2*self.n_mix,2*self.n_mix,3,padding='same'),nn.SiLU(),
+                                       nn.Conv1d(2*self.n_mix,  self.n_mix,3,padding='same'))
+        self.mix_net = nn.Sequential(nn.Conv1d(  self.n_mix,2*self.n_mix,3,padding='same'),nn.SiLU(),
+                                     nn.Conv1d(2*self.n_mix,2*self.n_mix,3,padding='same'),nn.SiLU(),
+                                     nn.Conv1d(2*self.n_mix,  self.n_mix,3,padding='same'))
 
         self.domain_map = LambdaLayer(gm_dist.domain_map)
 
+        self.init_flag = True
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor]:
 
+        if self.init_flag:
+            init_conv1d_weights(self.loc_net)
+            init_conv1d_weights(self.scale_net)
+            self.init_flag=False
+
         nb = x.size(0) #batch size
+        nv = x.size(1) #feature size
 
         if self.mix_channel != None:
             x = self.mix_channel(x)
 
+        enc = self.encoder(x).reshape(nb,nv,self.n_mix,self.n_out).reshape(-1,self.n_mix,self.n_out)
 
-        loc = self.loc_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x number_of_mixtures
-
-        x = x.detach()
-        scale = self.scale_net(x).reshape(nb,-1,self.n_out,self.n_mix).transpose(1,2) #batch_size x prediction_length x nvar x nmber_of_mixtures
-        mix_weight = self.mix_weight(x).mean(1).reshape(nb,-1,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
+        loc   = self.loc_net(enc).reshape(nb,nv,self.n_mix,self.n_out).permute(0,3,1,2)
+        scale = self.scale_net(enc.detach()).reshape(nb,nv,self.n_mix,self.n_out).permute(0,3,1,2)
+        mix_weight = self.mix_weight(x.detach()).mean(1).reshape(nb,-1,self.n_mix)  #batch_size x  prediction_length x number_of_mixtures
 
         return self.domain_map(loc,scale,mix_weight)
+
+def init_conv1d_weights(model):
+    for module in model.modules():
+        if isinstance(module, nn.Conv1d):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
 
