@@ -2249,10 +2249,10 @@ class AffineTransformed_Penalized(AffineTransformed):
             log_prob = log_prob - (xx-component_mean).pow(2).mean((-2,-1))*self.reg_mean
 
         if self.reg_var > 0.0:
-            component_var = self.base_dist.component_distribution.variance
+            component_var = self.base_dist.component_distribution.variance*self.scale.unsqueeze(-2).pow(2)
 
             #log_prob = log_prob - (1/component_var).mean((-2,-1))*self.reg_var
-            log_prob = log_prob - (  component_var).mean((-2,-1))*self.reg_var*1.e2
+            log_prob = log_prob - component_var.mean(-2).sum(-1)*self.reg_var
 
         return log_prob
 
@@ -2346,10 +2346,10 @@ class TTM_ParameterProjection(nn.Module):
             self.mix_channel = None
 
         if gm_dist.mixture_mode == 'small':
-            #self.mix_weight = nn.Sequential(nn.Linear(in_features,in_features),nn.SiLU(),
-            #                                nn.Linear(in_features,self.n_mix))
-            self.mix_weight = nn.Sequential(nn.Linear(in_features,128),nn.SiLU(),
-                                            nn.Linear(128,self.n_mix))
+            self.mix_weight = nn.Sequential(nn.Linear(in_features,in_features),nn.SiLU(),
+                                            nn.Linear(in_features,self.n_mix))
+            #self.mix_weight = nn.Sequential(nn.Linear(in_features,128),nn.SiLU(),
+            #                                nn.Linear(128,self.n_mix))
                                             
         else:
             self.mix_weight = nn.Sequential(nn.Linear(in_features, in_features),nn.SiLU(),
