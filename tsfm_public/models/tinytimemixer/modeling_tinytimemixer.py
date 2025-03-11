@@ -2237,7 +2237,7 @@ class AffineTransformed_Penalized(AffineTransformed):
         #moment matching regularization
         #NLL = (x-self.mean).pow(2)/self.variance + self.variance.log()
         #log_prob = log_prob - NLL.sum(-1)*0.1
-        log_prob = log_prob - (x-self.mean).pow(2).sum(-1)*0.1
+        log_prob = log_prob - (x-self.mean).pow(2).sum(-1)
 
         #add penalty functions
         if self.reg_mean > 0.0:
@@ -2249,7 +2249,9 @@ class AffineTransformed_Penalized(AffineTransformed):
             log_prob = log_prob - (xx-component_mean).pow(2).mean((-2,-1))*self.reg_mean
 
         if self.reg_var > 0.0:
+            mix_weight = self.base_dist.mixture_distribution.probs.unsqueeze(-1)
             component_var = self.base_dist.component_distribution.variance*self.scale.unsqueeze(-2).pow(2)
+            component_var = component_var*mix_weight
 
             #log_prob = log_prob - (1/component_var).mean((-2,-1))*self.reg_var
             log_prob = log_prob - component_var.mean(-2).sum(-1)*self.reg_var
