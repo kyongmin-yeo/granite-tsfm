@@ -31,6 +31,8 @@ import torch.distributions as Dist
 
 from .configuration_tinytimemixer import TinyTimeMixerConfig
 
+from .diffusion import Diffusion
+
 
 logger = logging.get_logger(__name__)
 
@@ -1717,6 +1719,9 @@ def nll(input: Dist.Distribution, target: torch.Tensor) -> torch.Tensor:
     """
     return -input.log_prob(target)
 
+def ddpm(input: Diffusion, target: torch.Tensor) -> torch.Tensor:
+    return input.loss(target)
+
 
 def weighted_average(input_tensor: torch.Tensor, weights: Optional[torch.Tensor] = None, dim=None) -> torch.Tensor:
     """
@@ -1773,7 +1778,7 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
 
         if config.loss in ["mse", "mae", "pinball", "huber"] or config.loss is None:
             self.distribution_output = None
-        elif config.loss == "nll":
+        elif config.loss in ["nll","ddpm"]:
             if self.prediction_filter_length is None:
                 dim = config.prediction_length
             else:
@@ -1783,12 +1788,15 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
                 "student_t": StudentTOutput,
                 "normal": NormalOutput,
                 "negative_binomial": NegativeBinomialOutput,
-                "mixture": MixtureOutput
+                "mixture": MixtureOutput,
+                "diffusion": Diffusion
             }
             output_class = distribution_output_map.get(config.distribution_output, None)
             if output_class is not None:
                 self.distribution_output = output_class(dim=dim)
-                if self.distribution_output.distribution_class == Dist.MixtureSameFamily:
+                if config.distribution_output == 'diffusion':
+                    self.distribution_output.set_diffusion()
+                elif self.distribution_output.distribution_class == Dist.MixtureSameFamily:
                     num_input_channels = config.num_input_channels
                     if config.prediction_channel_indices == None:
                         num_output_channels = 1
@@ -1895,6 +1903,8 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
             #    "NLL loss and Distribution heads are currently not allowed. Use mse or mae as loss functions."
             #)
             loss = nll
+        elif self.loss == 'ddpm':
+            loss = ddpm
         elif self.loss is None:
             loss = None
         else:
@@ -1988,7 +1998,6 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
                     else:
                         loss_val = loss(distribution, future_values)
                 loss_val = weighted_average(loss_val)
-            self.pred_distribution = distribution
         else:
             y_hat = y_hat * scale + loc
             if future_values is not None and return_loss is True and loss is not None:
@@ -2062,10 +2071,10 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
 
         # get distribution
 
-        #distribution = self.distribution_output.distribution(
-        #    outputs.prediction_outputs, loc=outputs.loc, scale=outputs.scale
-        #)
-        distribution = self.pred_distribution
+        distribution = self.distribution_output.distribution(
+            outputs.prediction_outputs, loc=outputs.loc, scale=outputs.scale
+        )
+        #distribution = self.pred_distribution
 
         # get samples: list of [batch_size x prediction_length x num_channels]
         samples = distribution.sample((num_parallel_samples,)).transpose(0,1) # [batch_size x num_samples x prediction_length x num_channels]
@@ -2222,6 +2231,11 @@ class TinyTimeMixerForMaskedPrediction(TinyTimeMixerForPrediction):
             static_categorical_values=static_categorical_values,
             # metadata = metadata
         )
+
+
+###################################################################################
+#   Mixture Distribution Head
+###################################################################################
 
 class AffineTransformed_Penalized(AffineTransformed):
     def __init__(self, base_distribution: Dist.Distribution, loc=None, scale=None, event_dim=0, reg_mean=0.0, reg_var=0.0):
@@ -2397,4 +2411,8 @@ def init_conv1d_weights(model):
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+
+###################################################################################
+#   Diffusion Head
+###################################################################################
 
