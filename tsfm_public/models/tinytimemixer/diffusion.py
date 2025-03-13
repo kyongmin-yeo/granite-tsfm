@@ -30,16 +30,17 @@ class Diffusion(nn.Module):
 
     def set_diffusion(self,
                  diff_model='rescaled',       #diffusion model: 'orig' or 'rescaled'
-                 dim_t_emb = 32,          #time embedding dimension
+                 dim_t_emb = 64,          #time embedding dimension
                  beta_info = {},        #noise schedule infor
                  uniform_t = True,
+                 diff_substep = 10,     #training ratio
                  ):
 
         super().__init__()
 
         self.diff_model = diff_model
-
         self.uniform_t = uniform_t
+        self.substep = diff_substep
 
         alpha,beta,gamma = noise_scheduler(**beta_info) 
 
@@ -82,10 +83,10 @@ class Diffusion(nn.Module):
 
         self.time_emb = nn.Sequential(Position_Embeddings(dim_t),
                                       nn.Linear(dim_t,  128),nn.SiLU(),
-                                      nn.Linear(128  ,dim_t),nn.SiLU())
+                                      nn.Linear(128  ,dim_t))
 
         self.cond_emb = nn.Sequential(nn.Linear(dim_in,  128),nn.SiLU(),
-                                      nn.Linear(   128,dim_t),nn.SiLU())
+                                      nn.Linear(   128,dim_t))
 
         self.scale_emb = nn.Sequential(nn.Linear(2*dim_t,128),nn.SiLU(),
                                        nn.Linear(128,128),nn.SiLU(),
@@ -122,10 +123,13 @@ class Diffusion(nn.Module):
         self.cond_var  = self.cond_emb(x_in.detach())
         return self.mean_orig
 
+    @property
+    def mean(self):
+        return self.mean_orig*self.scale + self.loc
+
     def distribution(self,x_in,loc,scale):
         self.loc = loc
         self.scale = scale
-        self.mean = self.mean_orig*scale + loc
         return self
 
     def one_step(self, x_in, t_in, c_in=None):
@@ -182,6 +186,8 @@ class Diffusion(nn.Module):
         y_fluc = target - self.mean
 
         mean_loss = y_fluc.pow(2).mean()
+        if self.sgd_counter%self.substep > 0:
+            mean_loss = mean_loss.detach()
 
         #Fluctuating component
         #sample time
@@ -198,7 +204,8 @@ class Diffusion(nn.Module):
 
         fluc_loss = (y0-yy).pow(2).mean()
 
-        total_loss = mean_loss*0.1*math.exp(-self.sgd_counter/1000) + fluc_loss
+        #total_loss = mean_loss*0.1*math.exp(-self.sgd_counter/2000) + fluc_loss
+        total_loss = mean_loss + fluc_loss
 
         self.sgd_counter += 1
 
@@ -243,7 +250,7 @@ class Position_Embeddings(nn.Module):
         return embeddings
 
 #Define noise schedulers
-def noise_scheduler(schedule='cos2',num_steps=400,tau=1,**kwargs):
+def noise_scheduler(schedule='cos2',num_steps=200,tau=1,**kwargs):
     if schedule == 'cos':
         print('use cosine-1 gamma scheduler')
         gamma = cosine_schedule(num_steps,tau=tau)
