@@ -2061,6 +2061,11 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
         if num_parallel_samples == None:
             num_parallel_samples = self.num_parallel_samples
 
+        if hasattr(self.distribution_output,'diff_model'):
+            self.loss = 'ddpm'
+        else:
+            self.loss = 'nll'
+
         # get model output
         outputs = self(
             past_values=past_values,

@@ -30,7 +30,7 @@ class Diffusion(nn.Module):
 
     def set_diffusion(self,
                  diff_model='rescaled',       #diffusion model: 'orig' or 'rescaled'
-                 dim_t_emb = 64,          #time embedding dimension
+                 dim_t_emb = 32,          #time embedding dimension
                  beta_info = {},        #noise schedule infor
                  uniform_t = True,
                  diff_substep = 10,     #training ratio
@@ -101,6 +101,7 @@ class Diffusion(nn.Module):
         self.fluc_pred = nn.Sequential(nn.Linear(dim_out,dim_out),nn.SiLU(),
                                        nn.Linear(dim_out,dim_out),nn.SiLU(),
                                        nn.Linear(dim_out,dim_out))
+        #self.fluc_pred = diff_net(dim_out)
 
         return self.forward
 
@@ -184,7 +185,6 @@ class Diffusion(nn.Module):
 
         #Mean component
         y_fluc = target - self.mean
-
         mean_loss = y_fluc.pow(2).mean()
         if self.sgd_counter%self.substep > 0:
             mean_loss = mean_loss.detach()
@@ -201,10 +201,9 @@ class Diffusion(nn.Module):
 
         xx,yy = self.prior_sampling(y_fluc,tt)
         y0 = self.one_step(xx,tt.squeeze(-1))
+        
+        fluc_loss = (y0-yy).mul(self.scale.transpose(-1,-2)).pow(2).mean()
 
-        fluc_loss = (y0-yy).pow(2).mean()
-
-        #total_loss = mean_loss*0.1*math.exp(-self.sgd_counter/2000) + fluc_loss
         total_loss = mean_loss + fluc_loss
 
         self.sgd_counter += 1
@@ -234,6 +233,23 @@ class Diffusion(nn.Module):
 
         return x_new
 
+#define diffusion network
+class diff_net(nn.Module):
+    def __init__(self,dim):
+        super().__init__()
+        self.dim = dim
+        self.net = nn.ModuleList([nn.Linear(dim,dim),nn.Linear(dim,dim),nn.Linear(dim,dim)])
+    def forward(self,x_in):
+        x0 = x_in
+        x0 = x0 + F.silu(self.net[0](x0))
+        x1 = F.layer_norm(x0,(self.dim,))
+        x0 = x0 + F.silu(self.net[1](x1))
+        x1 = F.layer_norm(x0,(self.dim,))
+        x0 = x0 + F.silu(self.net[2](x1))
+
+        return x0
+        
+
 #Positional Embedding
 class Position_Embeddings(nn.Module):
     def __init__(self, dim):
@@ -250,7 +266,7 @@ class Position_Embeddings(nn.Module):
         return embeddings
 
 #Define noise schedulers
-def noise_scheduler(schedule='cos2',num_steps=200,tau=1,**kwargs):
+def noise_scheduler(schedule='cos2',num_steps=400,tau=1,**kwargs):
     if schedule == 'cos':
         print('use cosine-1 gamma scheduler')
         gamma = cosine_schedule(num_steps,tau=tau)
