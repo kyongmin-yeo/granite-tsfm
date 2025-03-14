@@ -30,10 +30,10 @@ class Diffusion(nn.Module):
 
     def set_diffusion(self,
                  diff_model='rescaled',       #diffusion model: 'orig' or 'rescaled'
-                 dim_t_emb = 32,          #time embedding dimension
+                 dim_t_emb = 64,          #time embedding dimension
                  beta_info = {},        #noise schedule infor
                  uniform_t = True,
-                 diff_substep = 10,     #training ratio
+                 diff_substep = 15,     #training ratio
                  ):
 
         super().__init__()
@@ -98,10 +98,7 @@ class Diffusion(nn.Module):
 
         self.mean_pred = nn.Linear(dim_in,dim_out)
 
-        self.fluc_pred = nn.Sequential(nn.Linear(dim_out,dim_out),nn.SiLU(),
-                                       nn.Linear(dim_out,dim_out),nn.SiLU(),
-                                       nn.Linear(dim_out,dim_out))
-        #self.fluc_pred = diff_net(dim_out)
+        self.fluc_pred = diff_net(dim_out,dim_out)
 
         return self.forward
 
@@ -159,8 +156,8 @@ class Diffusion(nn.Module):
         nb = self.mean.size(0)
         nv = self.mean.size(-1)
 
-        y_mean = self.mean    .repeat_interleave(ns,dim=0)
-        c_in   = self.cond_var.repeat_interleave(ns,dim=0)
+        y_mean = self.mean_orig.repeat_interleave(ns,dim=0)
+        c_in   = self.cond_var .repeat_interleave(ns,dim=0)
         y_fluc = self.backward_sampling(y_mean.transpose(-1,-2),c_in=c_in)
         y_fluc = y_fluc.transpose(-1,-2)
 
@@ -171,12 +168,8 @@ class Diffusion(nn.Module):
             scale = self.scale
             loc   = self.loc
 
-        y_fluc = y_fluc*scale + loc
-
-        y_out = y_mean+y_fluc
-
+        y_out = (y_mean+y_fluc)*scale + loc
         y_out = y_out.reshape(nb,ns,-1,nv).transpose(0,1) #num_samples x batch_size x prediction_length x num_channels
-
         return y_out
 
     def loss(self,target):
@@ -235,19 +228,19 @@ class Diffusion(nn.Module):
 
 #define diffusion network
 class diff_net(nn.Module):
-    def __init__(self,dim):
+    def __init__(self,dim_in,dim_out):
         super().__init__()
-        self.dim = dim
-        self.net = nn.ModuleList([nn.Linear(dim,dim),nn.Linear(dim,dim),nn.Linear(dim,dim)])
+        self.dim = dim_out
+        self.net = nn.ModuleList([nn.Linear(dim_in,dim_out),nn.Linear(dim_out,dim_out),nn.Linear(dim_out,dim_out)])
+        self.final = nn.Linear(dim_out,dim_out)
     def forward(self,x_in):
         x0 = x_in
-        x0 = x0 + F.silu(self.net[0](x0))
-        x1 = F.layer_norm(x0,(self.dim,))
-        x0 = x0 + F.silu(self.net[1](x1))
-        x1 = F.layer_norm(x0,(self.dim,))
-        x0 = x0 + F.silu(self.net[2](x1))
+        for net in self.net:
+            x1 = F.layer_norm(x0,(self.dim,))
+            x0 = x0 + F.silu(net(x1))
+        x_out = self.final(F.silu(x0))
 
-        return x0
+        return x_out
         
 
 #Positional Embedding
@@ -266,7 +259,7 @@ class Position_Embeddings(nn.Module):
         return embeddings
 
 #Define noise schedulers
-def noise_scheduler(schedule='cos2',num_steps=400,tau=1,**kwargs):
+def noise_scheduler(schedule='cos2',num_steps=200,tau=1,**kwargs):
     if schedule == 'cos':
         print('use cosine-1 gamma scheduler')
         gamma = cosine_schedule(num_steps,tau=tau)
