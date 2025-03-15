@@ -2,7 +2,7 @@
 #
 """TinyTimeMixer model configuration"""
 
-from typing import Optional, Union
+from typing import Optional, Union, Dict
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
@@ -106,6 +106,16 @@ class TinyTimeMixerConfig(PretrainedConfig):
         distribution_output (`string`, *optional*, defaults to `"student_t"`):
             The distribution emission head for the model when loss is "nll". Could be either "student_t", "normal",
             "negative_binomial","mixture".
+        diff_model ('string', 'rescaled' or 'orig'm defaults to 'rescaled'):
+            'rescaled' or 'original' version of diffusion process
+        dim_t_emb ('int', defaults to 64):
+            dimension of diffusion time embedding
+        beta_info ('Dict', *optional*):
+            diffusion model noise scheduler 
+        uniform_t_sampling ('bool', *optional*, defaults to True):
+            uniform diffusion time sampling in SGD. Set to True
+        diff_substep ('int'):
+            sub iteration of diffusion model. The mean network is traiend only once in diff_substep.
         prediction_channel_indices (`list`, *optional*):
             List of channel indices to forecast. If None, forecast all channels. Target data is expected to have all
             channels and we explicitly filter the channels in prediction and target before loss computation. Please provide the indices
@@ -198,13 +208,21 @@ class TinyTimeMixerConfig(PretrainedConfig):
         frequency_token_vocab_size: int = 5,
         # General head configuration
         head_dropout: float = 0.2,
+        # Probabilistic forecast head configuration
+        # parametric distributions
         distribution_output: str = "student_t",
         num_parallel_samples: int = 100,
         num_of_mixtures: int = 4,
         mixture_base: str = 'laplace',
         mixture_mode: str = 'small',
-        mixture_mean_reg: float = 1.e-4,
+        mixture_mean_reg: float = 0.0,
         mixture_var_reg: float = 1.e-1,
+        # diffusion head
+        diff_model: str = 'rescaled',
+        dim_t_emb: int = 64,
+        beta_info: Dict = {},
+        uniform_t_sampling: bool = True,
+        diff_substep: int = 15,
         # decoder parameters
         decoder_num_layers: int = 8,
         decoder_d_model: int = 8,
@@ -263,6 +281,12 @@ class TinyTimeMixerConfig(PretrainedConfig):
         self.mixture_mode = mixture_mode
         self.mixture_mean_reg = mixture_mean_reg
         self.mixture_var_reg = mixture_var_reg
+
+        self.diff_model = diff_model
+        self.dim_t_emb = dim_t_emb
+        self.beta_info = beta_info
+        self.uniform_t_sampling = uniform_t_sampling
+        self.diff_substep = diff_substep
 
         self.use_decoder = use_decoder
 
