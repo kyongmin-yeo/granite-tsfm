@@ -2585,7 +2585,8 @@ class Diffusion(nn.Module):
         else:
             tt = torch.randint(self.T,(nb,),device=target.device).view(-1,1,1).repeat(1,nv,1)
 
-        y_fluc = (y_fluc.detach()-self.loc)/self.scale
+        #y_fluc = (y_fluc.detach()-self.loc)/self.scale
+        y_fluc = y_fluc.detach()/self.scale
         y_fluc = y_fluc.transpose(-1,-2)
 
         xx,yy = self.prior_sampling(y_fluc,tt)
