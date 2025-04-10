@@ -114,8 +114,8 @@ class TinyTimeMixerConfig(PretrainedConfig):
             diffusion model noise scheduler 
         uniform_t_sampling ('bool', *optional*, defaults to True):
             uniform diffusion time sampling in SGD. Set to True
-        diff_substep ('int'):
-            sub iteration of diffusion model. The mean network is traiend only once in diff_substep.
+        diff_early_stop_wait ('int'):
+            early stop patience for the mean prediction
         prediction_channel_indices (`list`, *optional*):
             List of channel indices to forecast. If None, forecast all channels. Target data is expected to have all
             channels and we explicitly filter the channels in prediction and target before loss computation. Please provide the indices
@@ -222,7 +222,7 @@ class TinyTimeMixerConfig(PretrainedConfig):
         dim_t_emb: int = 64,
         beta_info: Dict = {},
         uniform_t_sampling: bool = True,
-        diff_substep: int = 15,
+        diff_early_stop_wait: int = 5,
         # decoder parameters
         decoder_num_layers: int = 8,
         decoder_d_model: int = 8,
@@ -286,7 +286,7 @@ class TinyTimeMixerConfig(PretrainedConfig):
         self.dim_t_emb = dim_t_emb
         self.beta_info = beta_info
         self.uniform_t_sampling = uniform_t_sampling
-        self.diff_substep = diff_substep
+        self.diff_early_stop_wait = diff_early_stop_wait
 
         self.use_decoder = use_decoder
 

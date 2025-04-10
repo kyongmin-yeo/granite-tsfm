@@ -1795,7 +1795,7 @@ class TinyTimeMixerForPrediction(TinyTimeMixerPreTrainedModel):
                         dim_t_emb = config.dim_t_emb,
                         beta_info = config.beta_info,
                         uniform_t_sampling = config.uniform_t_sampling,
-                        diff_substep = config.diff_substep
+                        early_stop_wait = config.diff_early_stop_wait
                     )
                 elif self.distribution_output.distribution_class == Dist.MixtureSameFamily:
                     num_input_channels = config.num_input_channels
@@ -2429,14 +2429,14 @@ class Diffusion(nn.Module):
                  dim_t_emb = 64,          #time embedding dimension
                  beta_info = {},        #noise schedule infor
                  uniform_t_sampling = True,
-                 diff_substep = 15,     #training ratio
+                 early_stop_wait = 5,     #early stop patience
                  ):
 
         super().__init__()
 
         self.diff_model = diff_model
         self.uniform_t_sampling = uniform_t_sampling
-        self.substep = diff_substep
+        self.early_stop_wait = early_stop_wait
 
         alpha,beta,gamma = noise_scheduler(**beta_info) 
 
@@ -2467,9 +2467,16 @@ class Diffusion(nn.Module):
 
         self.dim_t = dim_t_emb
 
-        self.sgd_counter = 0
         self.epoch_counter = 0
         self.prev_train = True
+
+        self.valid_step = False
+        self.valid_loss = 0.0
+        self.valid_loss_min = 1000000
+        self.early_stop_cnt = 0
+        self.valid_counter = 0
+
+        self.stop_train_mean = False
 
         
     def get_parameter_projection(self, in_features: int):
@@ -2558,10 +2565,30 @@ class Diffusion(nn.Module):
         return y_out
 
     def loss(self,target):
-        cur_train = self.training
-        if self.prev_train and (not cur_train):
-            self.epoch_counter += 1
-        self.prev_train = cur_train
+
+        if not self.stop_train_mean:
+            cur_train = self.training
+            if self.prev_train and (not cur_train):
+                self.valid_step = True
+                self.epoch_counter += 1
+            elif (not self.prev_train) and cur_train:
+                self.valid_step = False
+                self.valid_loss = self.valid_loss / self.valid_counter
+
+                if self.valid_loss < self.valid_loss_min - 0.01:
+                    self.valid_loss_min = self.valid_loss
+                    self.early_stop_cnt = 0
+                else:
+                    self.early_stop_cnt += 1
+
+                self.valid_counter = 0
+                self.valid_loss = 0.0
+
+                if self.early_stop_cnt > self.early_stop_wait:
+                    self.stop_train_mean = True
+                    print(f'Stop training mean prediction at epoch {self.epoch_counter}')
+
+            self.prev_train = cur_train
 
         nb = target.size( 0)
         nv = target.size(-1)
@@ -2569,10 +2596,13 @@ class Diffusion(nn.Module):
         #Mean component
         y_fluc = target - self.mean
         mean_loss = y_fluc.pow(2).mean()
-        #if self.epoch_counter > 40:
-        #    mean_loss = mean_loss.detach()
-        if self.sgd_counter%self.substep > 0:
+
+        if self.stop_train_mean:
             mean_loss = mean_loss.detach()
+        else:
+            if self.valid_step:
+                self.valid_counter += 1
+                self.valid_loss    += mean_loss.detach().item()
 
         #Fluctuating component
         #sample time
@@ -2590,8 +2620,6 @@ class Diffusion(nn.Module):
         fluc_loss = (y0-yy).mul(self.scale.transpose(-1,-2)).pow(2).mean()
 
         total_loss = mean_loss + fluc_loss
-
-        self.sgd_counter += 1
 
         return total_loss
 
@@ -2625,7 +2653,7 @@ def ddpm(input: Diffusion, target: torch.Tensor) -> torch.Tensor:
 
 #define diffusion network
 class diff_net(nn.Module):
-    def __init__(self,dim_in,dim_out,dim_emb,num_layers=2,mode='orig'):
+    def __init__(self,dim_in,dim_out,dim_emb,num_layers=1,mode='orig'):
         super().__init__()
         self.dim = dim_out
 
