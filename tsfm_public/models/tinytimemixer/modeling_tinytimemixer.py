@@ -2468,6 +2468,8 @@ class Diffusion(nn.Module):
         self.dim_t = dim_t_emb
 
         self.sgd_counter = 0
+        self.epoch_counter = 0
+        self.prev_train = True
 
         
     def get_parameter_projection(self, in_features: int):
@@ -2484,17 +2486,9 @@ class Diffusion(nn.Module):
         self.cond_emb = nn.Sequential(nn.Linear(dim_in,  128),nn.SiLU(),
                                       nn.Linear(   128,dim_t))
 
-        self.scale_emb = nn.Sequential(nn.Linear(2*dim_t,128),nn.SiLU(),
-                                       nn.Linear(128,128),nn.SiLU(),
-                                       nn.Linear(128,dim_out))
-
-        self.pos_emb = nn.Sequential(nn.Linear(2*dim_t,128),nn.SiLU(),
-                                     nn.Linear(128,128),nn.SiLU(),
-                                     nn.Linear(128,dim_out))
-
         self.mean_pred = nn.Linear(dim_in,dim_out)
 
-        self.fluc_pred = diff_net(dim_out,dim_out)
+        self.fluc_pred = diff_net(dim_out,dim_out,2*dim_t)
 
         return self.forward
 
@@ -2538,12 +2532,7 @@ class Diffusion(nn.Module):
 
         z_in = torch.cat([c0,t0],dim=-1)
 
-        pos_emb   = self.  pos_emb(z_in)
-        scale_emb = self.scale_emb(z_in)
-
-        x_in = x_in*(scale_emb+1) + pos_emb
-
-        x_out = self.fluc_pred(x_in)
+        x_out = self.fluc_pred(x_in,z_in)
 
         return x_out
 
@@ -2569,14 +2558,21 @@ class Diffusion(nn.Module):
         return y_out
 
     def loss(self,target):
+        cur_train = self.training
+        if self.prev_train and (not cur_train):
+            self.epoch_counter += 1
+        self.prev_train = cur_train
+
         nb = target.size( 0)
         nv = target.size(-1)
 
         #Mean component
         y_fluc = target - self.mean
         mean_loss = y_fluc.pow(2).mean()
-        if self.sgd_counter%self.substep > 0:
+        if self.epoch_counter > 40:
             mean_loss = mean_loss.detach()
+        #if self.sgd_counter%self.substep > 0:
+        #    mean_loss = mean_loss.detach()
 
         #Fluctuating component
         #sample time
@@ -2585,7 +2581,6 @@ class Diffusion(nn.Module):
         else:
             tt = torch.randint(self.T,(nb,),device=target.device).view(-1,1,1).repeat(1,nv,1)
 
-        #y_fluc = (y_fluc.detach()-self.loc)/self.scale
         y_fluc = y_fluc.detach()/self.scale
         y_fluc = y_fluc.transpose(-1,-2)
 
@@ -2630,17 +2625,45 @@ def ddpm(input: Diffusion, target: torch.Tensor) -> torch.Tensor:
 
 #define diffusion network
 class diff_net(nn.Module):
-    def __init__(self,dim_in,dim_out):
+    def __init__(self,dim_in,dim_out,dim_emb):
         super().__init__()
         self.dim = dim_out
-        self.net = nn.ModuleList([nn.Linear(dim_in,dim_out),nn.Linear(dim_out,dim_out),nn.Linear(dim_out,dim_out)])
+
+        net = []
+        net+= [nn.Sequential(nn.Linear(dim_in ,128),nn.SiLU(),nn.Linear(128,dim_out))]
+        net+= [nn.Sequential(nn.Linear(dim_out,128),nn.SiLU(),nn.Linear(128,dim_out))]
+        net+= [nn.Sequential(nn.Linear(dim_out,128),nn.SiLU(),nn.Linear(128,dim_out))]
+
+        scale_emb = []
+        scale_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_in ))]
+        scale_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
+        scale_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
+
+        pos_emb = []
+        pos_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_in ))]
+        pos_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
+        pos_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
+
+        self.      net = nn.ModuleList(      net)
+        self.  pos_emb = nn.ModuleList(  pos_emb)
+        self.scale_emb = nn.ModuleList(scale_emb)
+
         self.final = nn.Linear(dim_out,dim_out)
-    def forward(self,x_in):
+
+    def forward(self,x_in,c_in):
+
         x0 = x_in
-        for net in self.net:
+        for i in range(len(self.net)):
+            pos   = self.  pos_emb[i](c_in)
+            scale = self.scale_emb[i](c_in)
+
             x1 = F.layer_norm(x0,(self.dim,))
-            x0 = x0 + F.silu(net(x1))
-        x_out = self.final(F.silu(x0))
+            x1 = x1*(scale+1) + pos
+            x0 = x0 + self.net[i](x1)
+
+        x0 = F.layer_norm(x0,(self.dim,))
+
+        x_out = self.final(x0)
 
         return x_out
         
