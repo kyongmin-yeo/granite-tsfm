@@ -2488,7 +2488,7 @@ class Diffusion(nn.Module):
 
         self.mean_pred = nn.Linear(dim_in,dim_out)
 
-        self.fluc_pred = diff_net(dim_out,dim_out,2*dim_t)
+        self.fluc_pred = diff_net(dim_out,dim_out,2*dim_t,mode=self.diff_model)
 
         return self.forward
 
@@ -2569,10 +2569,10 @@ class Diffusion(nn.Module):
         #Mean component
         y_fluc = target - self.mean
         mean_loss = y_fluc.pow(2).mean()
-        if self.epoch_counter > 40:
-            mean_loss = mean_loss.detach()
-        #if self.sgd_counter%self.substep > 0:
+        #if self.epoch_counter > 40:
         #    mean_loss = mean_loss.detach()
+        if self.sgd_counter%self.substep > 0:
+            mean_loss = mean_loss.detach()
 
         #Fluctuating component
         #sample time
@@ -2625,43 +2625,42 @@ def ddpm(input: Diffusion, target: torch.Tensor) -> torch.Tensor:
 
 #define diffusion network
 class diff_net(nn.Module):
-    def __init__(self,dim_in,dim_out,dim_emb):
+    def __init__(self,dim_in,dim_out,dim_emb,num_layers=2,mode='orig'):
         super().__init__()
         self.dim = dim_out
 
-        net = []
-        net+= [nn.Sequential(nn.Linear(dim_in ,128),nn.SiLU(),nn.Linear(128,dim_out))]
-        net+= [nn.Sequential(nn.Linear(dim_out,128),nn.SiLU(),nn.Linear(128,dim_out))]
-        net+= [nn.Sequential(nn.Linear(dim_out,128),nn.SiLU(),nn.Linear(128,dim_out))]
-
+        net       = []
+        pos_emb   = []
         scale_emb = []
-        scale_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_in ))]
-        scale_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
-        scale_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
+        scale_out = []
 
-        pos_emb = []
-        pos_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_in ))]
-        pos_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
-        pos_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
+        for i in range(num_layers):
+            net      += [nn.Sequential(nn.Linear(dim_out,128),nn.SiLU(),nn.Linear(128,dim_out))]
+            pos_emb  += [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
+            scale_emb+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
+            scale_out+= [nn.Sequential(nn.Linear(dim_emb,128),nn.SiLU(),nn.Linear(128,dim_out))]
 
         self.      net = nn.ModuleList(      net)
         self.  pos_emb = nn.ModuleList(  pos_emb)
         self.scale_emb = nn.ModuleList(scale_emb)
+        self.scale_out = nn.ModuleList(scale_out)
 
-        self.final = nn.Linear(dim_out,dim_out)
+        if mode == 'orig':
+            self.final = nn.Identity()
+        elif mode == 'rescaled':
+            self.final = nn.Sequential(nn.LayerNorm(self.dim,elementwise_affine=False,bias=False),nn.Linear(dim_out,dim_out))
 
     def forward(self,x_in,c_in):
 
         x0 = x_in
         for i in range(len(self.net)):
-            pos   = self.  pos_emb[i](c_in)
-            scale = self.scale_emb[i](c_in)
+            pos_emb   = self.  pos_emb[i](c_in)
+            scale_emb = self.scale_emb[i](c_in)
+            scale_out = self.scale_out[i](c_in)
 
             x1 = F.layer_norm(x0,(self.dim,))
-            x1 = x1*(scale+1) + pos
-            x0 = x0 + self.net[i](x1)
-
-        x0 = F.layer_norm(x0,(self.dim,))
+            x1 = x1*(scale_emb+1) + pos_emb
+            x0 = x0 + self.net[i](x1)*scale_out
 
         x_out = self.final(x0)
 
