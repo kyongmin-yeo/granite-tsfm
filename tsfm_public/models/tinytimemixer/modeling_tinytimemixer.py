@@ -2668,7 +2668,8 @@ class diff_net(nn.Module):
         if mode == 'orig':
             self.final = nn.Identity()
         elif mode == 'rescaled':
-            self.final = nn.Sequential(nn.LayerNorm(self.dim,elementwise_affine=False,bias=False),nn.Linear(dim_out,dim_out))
+            #self.final = nn.Sequential(nn.LayerNorm(self.dim,elementwise_affine=False,bias=False),nn.Linear(dim_out,dim_out))
+            self.final = nn.Sequential(nn.Linear(dim_out,32),nn.SiLU(),nn.Linear(32,dim_out))
 
     def forward(self,x_in,c_in):
 
