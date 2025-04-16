@@ -2548,19 +2548,12 @@ class Diffusion(nn.Module):
         nb = self.mean.size(0)
         nv = self.mean.size(-1)
 
-        y_mean = self.mean_orig.repeat_interleave(ns,dim=0)
-        c_in   = self.cond_var .repeat_interleave(ns,dim=0)
+        y_mean = self.mean    .repeat_interleave(ns,dim=0)
+        c_in   = self.cond_var.repeat_interleave(ns,dim=0)
         y_fluc = self.backward_sampling(y_mean.transpose(-1,-2),c_in=c_in)
         y_fluc = y_fluc.transpose(-1,-2)
 
-        if torch.is_tensor(self.loc):
-            scale = self.scale.repeat_interleave(ns,dim=0)
-            loc   = self.loc  .repeat_interleave(ns,dim=0)
-        else:
-            scale = self.scale
-            loc   = self.loc
-
-        y_out = (y_mean+y_fluc)*scale + loc
+        y_out = y_mean + y_fluc
         y_out = y_out.reshape(nb,ns,-1,nv).transpose(0,1) #num_samples x batch_size x prediction_length x num_channels
         return y_out
 
@@ -2611,13 +2604,12 @@ class Diffusion(nn.Module):
         else:
             tt = torch.randint(self.T,(nb,),device=target.device).view(-1,1,1).repeat(1,nv,1)
 
-        y_fluc = y_fluc.detach()/self.scale
-        y_fluc = y_fluc.transpose(-1,-2)
+        y_fluc = y_fluc.detach().transpose(-1,-2)
 
         xx,yy = self.prior_sampling(y_fluc,tt)
         y0 = self.one_step(xx,tt.squeeze(-1))
         
-        fluc_loss = (y0-yy).mul(self.scale.transpose(-1,-2)).pow(2).mean()
+        fluc_loss = (y0-yy).pow(2).mean()
 
         total_loss = mean_loss + fluc_loss
 
