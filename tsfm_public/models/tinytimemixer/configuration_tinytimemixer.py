@@ -223,6 +223,7 @@ class TinyTimeMixerConfig(PretrainedConfig):
         beta_info: Dict = {},
         uniform_t_sampling: bool = True,
         diff_early_stop_wait: int = 5,
+        unscaled_diffusion: bool = False,
         # decoder parameters
         decoder_num_layers: int = 8,
         decoder_d_model: int = 8,
@@ -287,6 +288,7 @@ class TinyTimeMixerConfig(PretrainedConfig):
         self.beta_info = beta_info
         self.uniform_t_sampling = uniform_t_sampling
         self.diff_early_stop_wait = diff_early_stop_wait
+        self.unscaled_diffusion = unscaled_diffusion
 
         self.use_decoder = use_decoder
 

@@ -2425,11 +2425,12 @@ class Diffusion(nn.Module):
         self.scale = 1
 
     def set_diffusion(self,
-                 diff_model='rescaled',       #diffusion model: 'orig' or 'rescaled'
+                 diff_model='rescaled',       #diffusion model: 'orig', 'rescaled', 'mixed'
                  dim_t_emb = 64,          #time embedding dimension
                  beta_info = {},        #noise schedule infor
                  uniform_t_sampling = True,
                  early_stop_wait = 5,     #early stop patience
+                 unscaled_diffusion = False,
                  ):
 
         super().__init__()
@@ -2437,6 +2438,8 @@ class Diffusion(nn.Module):
         self.diff_model = diff_model
         self.uniform_t_sampling = uniform_t_sampling
         self.early_stop_wait = early_stop_wait
+
+        self.unscaled_diffusion = unscaled_diffusion
 
         alpha,beta,gamma = noise_scheduler(**beta_info) 
 
@@ -2452,7 +2455,7 @@ class Diffusion(nn.Module):
         self.register_buffer('sqrt_gamma'          ,   gamma .sqrt().float())
         self.register_buffer('one_over_sqrt_alpha' ,(1/alpha).sqrt().float())
 
-        if self.diff_model == 'orig':
+        if self.diff_model in ['orig','mixed']:
             self.register_buffer('backward_coef_xt',torch.ones_like(beta.float()))
             self.register_buffer('backward_coef_ft',-(beta/(1-gamma).sqrt()).float())
         elif self.diff_model == 'rescaled':
@@ -2494,8 +2497,7 @@ class Diffusion(nn.Module):
                                       nn.Linear(   128,dim_t))
 
         self.mean_pred = nn.Linear(dim_in,dim_out)
-
-        self.fluc_pred = diff_net(dim_out,dim_out,2*dim_t,mode=self.diff_model)
+        self.fluc_pred = diff_net(dim_out,dim_out,2*dim_t,num_layers=1,mode=self.diff_model,layer_norm=False)
 
         return self.forward
 
@@ -2506,7 +2508,7 @@ class Diffusion(nn.Module):
 
         xt = drift + self.sqrt_one_minus_gamma[t]*eps
 
-        if self.diff_model == 'orig':
+        if self.diff_model in ['orig','mixed']:
             return xt,eps
         elif self.diff_model == 'rescaled':
             return xt,drift
@@ -2528,6 +2530,7 @@ class Diffusion(nn.Module):
         return self
 
     def one_step(self, x_in, t_in, c_in=None):
+
         nb = x_in.size(0)
         nv = x_in.size(1)
 
@@ -2541,6 +2544,11 @@ class Diffusion(nn.Module):
 
         x_out = self.fluc_pred(x_in,z_in)
 
+        if self.diff_model == 'mixed':
+            a0 = self.sqrt_one_minus_gamma[t_in.unsqueeze(-1)]
+            a1 = self.sqrt_gamma[t_in.unsqueeze(-1)]
+            x_out = a0*x_in + a1*x_out
+
         return x_out
 
     def sample(self,sample_size=(1,)):
@@ -2548,12 +2556,27 @@ class Diffusion(nn.Module):
         nb = self.mean.size(0)
         nv = self.mean.size(-1)
 
-        y_mean = self.mean    .repeat_interleave(ns,dim=0)
+        if self.unscaled_diffusion:
+            y_mean = self.mean     .repeat_interleave(ns,dim=0)
+        else:
+            y_mean = self.mean_orig.repeat_interleave(ns,dim=0)
+
         c_in   = self.cond_var.repeat_interleave(ns,dim=0)
         y_fluc = self.backward_sampling(y_mean.transpose(-1,-2),c_in=c_in)
         y_fluc = y_fluc.transpose(-1,-2)
 
-        y_out = y_mean + y_fluc
+        if self.unscaled_diffusion:
+            y_out = y_mean + y_fluc
+        else:
+             if torch.is_tensor(self.loc):
+                 scale = self.scale.repeat_interleave(ns,dim=0)
+                 loc   = self.loc  .repeat_interleave(ns,dim=0)
+             else:
+                 scale = self.scale
+                 loc   = self.loc
+     
+             y_out = (y_mean+y_fluc)*scale + loc
+
         y_out = y_out.reshape(nb,ns,-1,nv).transpose(0,1) #num_samples x batch_size x prediction_length x num_channels
         return y_out
 
@@ -2604,12 +2627,20 @@ class Diffusion(nn.Module):
         else:
             tt = torch.randint(self.T,(nb,),device=target.device).view(-1,1,1).repeat(1,nv,1)
 
-        y_fluc = y_fluc.detach().transpose(-1,-2)
+        if self.unscaled_diffusion:
+            y_fluc = y_fluc.detach()
+        else:
+            y_fluc = y_fluc.detach()/self.scale
+
+        y_fluc = y_fluc.transpose(-1,-2)
 
         xx,yy = self.prior_sampling(y_fluc,tt)
         y0 = self.one_step(xx,tt.squeeze(-1))
         
-        fluc_loss = (y0-yy).pow(2).mean()
+        if self.unscaled_diffusion:
+            fluc_loss = (y0-yy).pow(2).mean()
+        else:
+            fluc_loss = (y0-yy).mul(self.scale.transpose(-1,-2)).pow(2).mean()
 
         total_loss = mean_loss + fluc_loss
 
@@ -2645,7 +2676,7 @@ def ddpm(input: Diffusion, target: torch.Tensor) -> torch.Tensor:
 
 #define diffusion network
 class diff_net(nn.Module):
-    def __init__(self,dim_in,dim_out,dim_emb,num_layers=1,mode='orig'):
+    def __init__(self,dim_in,dim_out,dim_emb,num_layers=2,mode='orig',layer_norm=False):
         super().__init__()
         self.dim = dim_out
 
@@ -2667,9 +2698,11 @@ class diff_net(nn.Module):
 
         if mode == 'orig':
             self.final = nn.Identity()
-        elif mode == 'rescaled':
-            #self.final = nn.Sequential(nn.LayerNorm(self.dim,elementwise_affine=False,bias=False),nn.Linear(dim_out,dim_out))
-            self.final = nn.Sequential(nn.Linear(dim_out,32),nn.SiLU(),nn.Linear(32,dim_out))
+        else:
+            if layer_norm:
+                self.final = nn.Sequential(nn.LayerNorm(self.dim,elementwise_affine=False,bias=False),nn.Linear(dim_out,dim_out))
+            else:
+                self.final = nn.Sequential(nn.Linear(dim_out,64),nn.SiLU(),nn.Linear(64,dim_out))
 
     def forward(self,x_in,c_in):
 
@@ -2681,7 +2714,7 @@ class diff_net(nn.Module):
 
             x1 = F.layer_norm(x0,(self.dim,))
             x1 = x1*(scale_emb+1) + pos_emb
-            x0 = x0 + self.net[i](x1)*scale_out
+            x0 = x0 + self.net[i](x1)*scale_out.pow(2)
 
         x_out = self.final(x0)
 
