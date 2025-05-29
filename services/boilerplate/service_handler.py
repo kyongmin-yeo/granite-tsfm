@@ -8,11 +8,12 @@ from typing import Optional, Tuple, Union
 
 import pandas as pd
 
+from tsfm_public.toolkit.tsfm_config import TSFMConfig
+
 from .inference_payloads import (
     BaseMetadataInput,
     BaseParameters,
 )
-from .tsfm_config import TSFMConfig
 
 
 LOGGER = logging.getLogger(__file__)
@@ -115,6 +116,13 @@ class ServiceHandler:
             return self, None
         except Exception as e:
             return self, e
+
+    @property
+    def handler_config(self):
+        if self.implementation is not None:
+            return self.implementation.handler_config
+        else:
+            return None
 
 
 def get_service_handler_class(

@@ -9,12 +9,6 @@
   ],
   "python.testing.unittestEnabled": false,
   "python.testing.pytestEnabled": true,
-  "ruff.format.args": [
-    "--config=./pyproject.toml"
-  ],
-  "ruff.lint.args": [
-    "--config=./pyproject.toml"
-  ],
   "editor.codeActionsOnSave": {
     "source.fixAll.ruff": "always"
   },
@@ -42,5 +36,9 @@
     "Uvicorn",
     "Werkzeug",
     "xgboostjobs"
-  ]
+  ],
+  "search.useGlobalIgnoreFiles": true,
+  "search.useParentIgnoreFiles": true,
+  "files.autoSave": "afterDelay",
+  "python.analysis.typeCheckingMode": "standard",
 }
